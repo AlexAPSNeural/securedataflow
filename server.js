@@ -1,90 +1,132 @@
-To create a secure Express.js server for the `SecureDataFlow` service, we'll set up an API that allows developers to manage data encryption and decryption. We'll use common encryption libraries like `crypto` and ensure secure practices such as environment variables for sensitive data.
+Creating a production-ready Express.js server for a service like SecureDataFlow involves setting up a robust API for handling secure data encryption and decryption. This involves integration with encryption services or custom encryption logic, user authentication, and potentially logging and error handling for actions performed via the API.
 
-First, ensure you have Node.js and npm installed, then create a new project:
-
-```bash
-mkdir secure-data-flow
-cd secure-data-flow
-npm init -y
-npm install express dotenv
-```
-
-Next, create the server using the following code:
+Below is an example of how you could structure such an Express.js server:
 
 ```javascript
 // server.js
+
 require('dotenv').config();
 const express = require('express');
-const crypto = require('crypto');
+const bodyParser = require('body-parser');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const { encryptData, decryptData } = require('./encryptionService');
 
 const app = express();
-app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const ALGORITHM = 'aes-256-ctr';
-const SECRET_KEY = process.env.SECRET_KEY || crypto.randomBytes(32).toString('hex'); // Fetch from env or generate a key
-const IV_LENGTH = 16; // For AES, this is always 16
+// Middleware
+app.use(helmet()); // Security headers
+app.use(morgan('common')); // Logger
+app.use(cors()); // Enable CORS
+app.use(bodyParser.json()); // Parse JSON bodies
 
-function encrypt(text) {
-  const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv(ALGORITHM, Buffer.from(SECRET_KEY, 'hex'), iv);
-  const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
-  return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+// Rate limiter to limit requests
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per window
+  message: "Too many requests from this IP, please try again later."
+});
+app.use('/api', apiLimiter);
+
+// Authentication Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) return res.sendStatus(401); // Unauthorized
+
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403); // Forbidden
+    req.user = user;
+    next();
+  });
 }
 
-function decrypt(encryptedText) {
-  const [iv, encrypted] = encryptedText.split(':').map(part => Buffer.from(part, 'hex'));
-  const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(SECRET_KEY, 'hex'), iv);
-  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return decrypted.toString('utf8');
-}
-
-app.post('/encrypt', (req, res) => {
+// Routes
+app.post('/api/encrypt', authenticateToken, (req, res) => {
   const { data } = req.body;
   if (!data) {
-    return res.status(400).json({ error: 'No data provided' });
+    return res.status(400).json({ message: 'No data provided' });
   }
-  const encryptedData = encrypt(data);
-  res.json({ encryptedData });
+
+  try {
+    const encrypted = encryptData(data);
+    res.json({ encrypted });
+  } catch (error) {
+    res.status(500).json({ message: 'Encryption failed', error: error.message });
+  }
 });
 
-app.post('/decrypt', (req, res) => {
+app.post('/api/decrypt', authenticateToken, (req, res) => {
   const { encryptedData } = req.body;
   if (!encryptedData) {
-    return res.status(400).json({ error: 'No encryptedData provided' });
+    return res.status(400).json({ message: 'No encrypted data provided' });
   }
+
   try {
-    const decryptedData = decrypt(encryptedData);
-    res.json({ decryptedData });
+    const decrypted = decryptData(encryptedData);
+    res.json({ decrypted });
   } catch (error) {
-    res.status(400).json({ error: 'Invalid encrypted data' });
+    res.status(500).json({ message: 'Decryption failed', error: error.message });
   }
 });
 
+// Server setup
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`SecureDataFlow API server is running on port ${PORT}`);
+  console.log(`SecureDataFlow server running on port ${PORT}`);
 });
+
+// encryptionService.js
+
+const crypto = require('crypto');
+
+const algorithm = 'aes-256-cbc';
+const key = crypto.scryptSync(process.env.ENCRYPTION_KEY, 'salt', 32); // Your encryption key
+const iv = crypto.randomBytes(16); // Initialization vector
+
+function encryptData(data) {
+  const cipher = crypto.createCipheriv(algorithm, key, iv);
+  let encrypted = cipher.update(data, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return `${iv.toString('hex')}:${encrypted}`;
+}
+
+function decryptData(encryptedData) {
+  const [ivHex, encryptedText] = encryptedData.split(':');
+  const decipherIv = Buffer.from(ivHex, 'hex');
+  const decipher = crypto.createDecipheriv(algorithm, key, decipherIv);
+  let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+
+module.exports = { encryptData, decryptData };
 ```
 
-We make use of environment variables for storing sensitive configuration data. Set up a `.env` file for the SECRET_KEY:
+### Explanation
 
-```ini
-# .env
-SECRET_KEY=YOUR_256_BIT_SECRET_KEY_HERE
-```
+1. **Security Measures:**
+   - **Helmet:** Set security HTTP headers.
+   - **Rate Limiting:** Prevents abuse by limiting the number of requests from a single IP.
+   - **CORS:** Allows cross-origin requests; configure as needed for security.
 
-Run the server:
+2. **Authentication:**
+   - **JWT Authentication:** Secures the API endpoints by ensuring users authenticate using JSON Web Tokens.
 
-```bash
-node server.js
-```
+3. **Encryption Logic:**
+   - **Crypto Module:** Utilizes Node.js built-in `crypto` library for data encryption and decryption.
 
-### Explanation:
-- **Encryption/Decryption**: Using AES-256-CTR mode with a random IV for each operation increases security by ensuring that the same input will not produce the same encrypted output.
-- **Endpoints**:
-  - `/encrypt`: Accepts JSON input with a `data` field to encrypt.
-  - `/decrypt`: Accepts JSON input with an `encryptedData` field to decrypt.
-- **Environment Variables**: Used for sensitive information; never hard-code these directly into codebases.
-- **Security Practices**: The server uses secure HTTP headers and stringent validation checks to provide security and compliance.
+4. **Environment Variables:**
+   - Ensure the use of `.env` for secret keys like `ENCRYPTION_KEY` and `ACCESS_TOKEN_SECRET`.
 
-This code sets a solid foundation for a scalable, secure data encryption service. Further enhancements could include user authentication, rate limiting, and extended error handling.
+5. **Error Handling:**
+   - Basic error handling is included. You might want to expand this for production use.
+
+6. **Organizational Structure:**
+   - Separated the encryption logic into an `encryptionService.js` file for modularity.
+
+Ensure you have the `.env` file set up properly with required environment variables and consider extending with additional features such as more detailed logging, analytics, detailed error reporting, and integration testing before deploying to production.
